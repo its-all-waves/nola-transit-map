@@ -23,7 +23,13 @@ const (
 	// Send pings to client with this period. Must be less than pongWait.
 	pingPeriod = (pongWait * 9) / 10
 
-	// Use in place of Clever Devices URL when in DEV mode
+	// Time between fetches to Clever Devices Bustime server
+	scraperFetchInterval = 10 * time.Second
+
+	// Wait time before retrying the Clever Devices server on fetch failure
+	scraperRetryInterval = 2 * time.Second
+
+	// Use in place of Clever Devices URL when in DEV mode.
 	mockCleverDevicesUrl = "http://localhost:8081/getvehicles"
 
 	// Clever Devices API URL: http://[host:port]/bustime/api/v3/getvehicles
@@ -32,7 +38,7 @@ const (
 
 	// Append to Clever Devices base url (above).
 	// tmres=m -> time resolution: minute.
-	// rtpidatafeed=bustime -> specify the bustime data feed.
+	// rtpidatafeed=bustime -> specify the Bustime data feed.
 	// format=json -> respond with json (as opposed to XML).
 	cleverDevicesVehicleQueryFormatter = "%s?key=%s&tmres=m&rtpidatafeed=bustime&format=json"
 )
@@ -166,7 +172,7 @@ func NewScraper() *Scraper {
 	}
 	config := &Config{
 		BaseUrl:  baseUrl,
-		Interval: 10 * time.Second,
+		Interval: scraperFetchInterval,
 		Key:      api_key,
 	}
 
@@ -184,14 +190,22 @@ func NewScraper() *Scraper {
 
 func (s *Scraper) Start(vs chan []Vehicle) {
 	for {
-		result := s.fetch()
+		result, err := s.fetch()
+		if err != nil {
+			log.Printf(
+				"ERROR: Scraper: Could not reach the Clever Devices server. Trying again in %d seconds. \n",
+				int(scraperRetryInterval.Seconds()),
+			)
+			time.Sleep(scraperRetryInterval)
+			continue
+		}
 		log.Printf("Found %d vehicles\n", len(result.Vehicles))
 		vs <- result.Vehicles
 		time.Sleep(s.config.Interval)
 	}
 }
 
-func (v *Scraper) fetch() *BustimeData {
+func (v *Scraper) fetch() (*BustimeData, error) {
 	key := v.config.Key
 	baseURL := v.config.BaseUrl
 	url := fmt.Sprintf(cleverDevicesVehicleQueryFormatter, baseURL, key)
@@ -199,6 +213,7 @@ func (v *Scraper) fetch() *BustimeData {
 	resp, err := v.client.Get(url)
 	if err != nil {
 		log.Println("ERROR: Scraper response:", err)
+		return nil, err
 	}
 	if resp.Body != nil {
 		defer resp.Body.Close()
@@ -211,7 +226,7 @@ func (v *Scraper) fetch() *BustimeData {
 	result := &BustimeResponse{}
 	json.Unmarshal(body, result)
 
-	return &result.Data
+	return &result.Data, nil
 }
 
 func (v *Scraper) Close() {
@@ -349,7 +364,7 @@ func (s *Server) writer(ws *websocket.Conn) {
 }
 
 func (s *Server) serveWs(w http.ResponseWriter, r *http.Request) {
-	log.Println("serving ws")
+	log.Println("Serving ws")
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		if _, ok := err.(websocket.HandshakeError); !ok {
